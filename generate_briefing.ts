@@ -30,7 +30,6 @@ function getTargetDate(): string {
 function log(msg: string) {
   const line = `[${new Date().toISOString()}] ${msg}`;
   console.log(line);
-  if (!existsSync(BRIEFINGS_DIR)) mkdirSync(BRIEFINGS_DIR, { recursive: true });
   appendFileSync(LOG_FILE, line + "\n");
 }
 
@@ -156,10 +155,10 @@ function gitCommitAndPush(filePath: string, date: string) {
 // ── Main ─────────────────────────────────────────────────────────────────────
 
 async function main() {
+  mkdirSync(BRIEFINGS_DIR, { recursive: true });
+
   const date = getTargetDate();
   log(`Starting briefing generation for ${date}`);
-
-  if (!existsSync(BRIEFINGS_DIR)) mkdirSync(BRIEFINGS_DIR, { recursive: true });
 
   const outPath = join(BRIEFINGS_DIR, `${date}.md`);
   if (existsSync(outPath)) {
@@ -167,36 +166,40 @@ async function main() {
     process.exit(0);
   }
 
-  // Parallel research agents
   log("Spawning 4 parallel research agents...");
   const keys = Object.keys(SOURCES) as FocusKey[];
   let results: Record<FocusKey, string>;
 
   try {
-    const outputs = await Promise.all(keys.map((k) => runAgent(k, date)));
+    const outputs = await Promise.all(
+      keys.map(async (k) => {
+        const out = await runAgent(k, date);
+        if (!out.trim()) throw new Error(`Agent ${k} returned empty result`);
+        return out;
+      })
+    );
     results = Object.fromEntries(keys.map((k, i) => [k, outputs[i]])) as Record<FocusKey, string>;
   } catch (err) {
     log(`FATAL: Agent failure — ${err}`);
     process.exit(1);
   }
 
-  // Validate — no empty results
-  for (const key of keys) {
-    if (!results[key]?.trim()) {
-      log(`FATAL: Agent ${key} returned empty result — aborting commit`);
-      process.exit(1);
-    }
-  }
-
   const markdown = assembleBriefing(date, results);
 
-  // Validate — no unfilled placeholders
   if (markdown.includes("{{") || markdown.includes("TODO") || markdown.includes("[INSERT")) {
     log("FATAL: Briefing contains unfilled placeholder text — aborting commit");
     process.exit(1);
   }
 
-  writeFileSync(outPath, markdown, "utf8");
+  try {
+    writeFileSync(outPath, markdown, { flag: "wx" });
+  } catch (err: any) {
+    if (err.code === "EEXIST") {
+      log(`Briefing for ${date} already exists — skipping.`);
+      process.exit(0);
+    }
+    throw err;
+  }
   log(`Briefing written to ${outPath}`);
 
   try {
