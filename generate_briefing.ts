@@ -5,9 +5,9 @@
  * Usage: bun generate_briefing.ts [--date YYYY-MM-DD]
  */
 
-import { execSync, spawn } from "child_process";
+import { spawnSync, spawn } from "child_process";
 import { existsSync, mkdirSync, appendFileSync, writeFileSync } from "fs";
-import { join, dirname } from "path";
+import { join, dirname, resolve } from "path";
 import { fileURLToPath } from "url";
 
 const REPO_DIR = dirname(fileURLToPath(import.meta.url));
@@ -19,7 +19,14 @@ const INFERENCE_TOOL = "/Users/jordanbeck/.claude/PAI/Tools/Inference.ts";
 
 function getTargetDate(): string {
   const idx = process.argv.indexOf("--date");
-  if (idx !== -1 && process.argv[idx + 1]) return process.argv[idx + 1];
+  if (idx !== -1 && process.argv[idx + 1]) {
+    const raw = process.argv[idx + 1];
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(raw)) {
+      console.error(`Invalid date format "${raw}". Expected YYYY-MM-DD.`);
+      process.exit(1);
+    }
+    return raw;
+  }
   const d = new Date();
   d.setDate(d.getDate() - 1);
   return d.toISOString().slice(0, 10);
@@ -89,12 +96,23 @@ Return ONLY the briefing text and source URLs. No preamble. Format:
 </sources>`;
 
   return new Promise((resolve, reject) => {
-    const proc = spawn("bun", [INFERENCE_TOOL, "smart", prompt], {
-      env: { ...process.env, PATH: `/Users/jordanbeck/.bun/bin:${process.env.PATH}` },
-    });
+    const env = { ...process.env };
+    delete env.ANTHROPIC_API_KEY;
+    delete env.CLAUDECODE;
+
+    const proc = spawn("claude", [
+      "--print",
+      "--model", "claude-sonnet-4-6",
+      "--allowedTools", "WebSearch,WebFetch",
+      "--output-format", "text",
+      "--setting-sources", "",
+    ], { env });
 
     let output = "";
     let errOutput = "";
+
+    proc.stdin.write(prompt);
+    proc.stdin.end();
 
     proc.stdout.on("data", (d: Buffer) => { output += d.toString(); });
     proc.stderr.on("data", (d: Buffer) => { errOutput += d.toString(); });
@@ -147,9 +165,13 @@ _Generated: ${new Date().toUTCString()} | JBeck Cyber automated briefing_
 // ── Git operations ───────────────────────────────────────────────────────────
 
 function gitCommitAndPush(filePath: string, date: string) {
-  execSync(`git -C "${REPO_DIR}" add "${filePath}"`, { stdio: "inherit" });
-  execSync(`git -C "${REPO_DIR}" commit -m "briefing: ${date} daily security update"`, { stdio: "inherit" });
-  execSync(`git -C "${REPO_DIR}" push origin main`, { stdio: "inherit" });
+  const run = (args: string[]) => {
+    const r = spawnSync("git", args, { cwd: REPO_DIR, stdio: "inherit" });
+    if (r.status !== 0) throw new Error(`git ${args[0]} failed (exit ${r.status})`);
+  };
+  run(["add", filePath]);
+  run(["commit", "-m", `briefing: ${date} daily security update`]);
+  run(["push", "origin", "main"]);
 }
 
 // ── Main ─────────────────────────────────────────────────────────────────────
@@ -161,6 +183,10 @@ async function main() {
   log(`Starting briefing generation for ${date}`);
 
   const outPath = join(BRIEFINGS_DIR, `${date}.md`);
+  if (!resolve(outPath).startsWith(resolve(BRIEFINGS_DIR) + "/")) {
+    log("FATAL: Path traversal detected in date argument");
+    process.exit(1);
+  }
   if (existsSync(outPath)) {
     log(`Briefing for ${date} already exists — skipping.`);
     process.exit(0);
