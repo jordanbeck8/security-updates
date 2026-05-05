@@ -1,0 +1,20 @@
+{
+  "name": "security-updates",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Open Source Situation Monitor — daily briefing generation",
+  "type": "module",
+  "main": "generate_briefing.ts",
+  "scripts": {
+    "briefing": "bun generate_briefing.ts",
+    "typecheck": "bun build generate_briefing.ts --target=bun --no-bundle --outfile=/dev/null"
+  },
+  "engines": {
+    "bun": ">=1.1.0"
+  },
+  "license": "UNLICENSED",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/jordanbeck8/security-updates"
+  }
+}

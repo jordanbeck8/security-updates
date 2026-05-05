@@ -13,7 +13,6 @@ import { fileURLToPath } from "url";
 const REPO_DIR = dirname(fileURLToPath(import.meta.url));
 const BRIEFINGS_DIR = join(REPO_DIR, "briefings");
 const LOG_FILE = join(BRIEFINGS_DIR, ".log");
-const INFERENCE_TOOL = "/Users/jordanbeck/.claude/PAI/Tools/Inference.ts";
 
 // ── Date resolution ──────────────────────────────────────────────────────────
 
@@ -96,9 +95,15 @@ Return ONLY the briefing text and source URLs. No preamble. Format:
 </sources>`;
 
   return new Promise((resolve, reject) => {
-    const env = { ...process.env };
-    delete env.ANTHROPIC_API_KEY;
-    delete env.CLAUDECODE;
+    // Allowlist-based subprocess env: pass only what `claude` actually needs
+    // (PATH for binary resolution, HOME for config dir, TMPDIR for scratch).
+    // This prevents incidental forwarding of unrelated host secrets like
+    // GH_TOKEN, AWS_*, or other AI provider keys.
+    const env: Record<string, string> = {};
+    for (const k of ["PATH", "HOME", "TMPDIR", "LANG", "LC_ALL", "TERM"]) {
+      const v = process.env[k];
+      if (typeof v === "string") env[k] = v;
+    }
 
     const proc = spawn("claude", [
       "--print",
