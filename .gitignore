@@ -1,6 +1,27 @@
+# Secrets / local config
 .env
 .env.*
 *.local
 *.key
 *.pem
+
+# Internal logs (briefings/.log is the runtime log, not a publishable briefing)
 briefings/.log
+
+# Node / Bun runtime
+node_modules/
+bun.lock
+bun.lockb
+package-lock.json
+*.tsbuildinfo
+
+# Build output
+dist/
+build/
+
+# OS / editor artifacts
+.DS_Store
+._*
+.idea/
+.vscode/
+.claude/
