@@ -3,6 +3,10 @@
 Curated X (Twitter) accounts used by the automated daily security briefing.
 Last reviewed: 2026-03-31.
 
+> Technical enrichment (vuln/exploit, breach, IP intel) tools: see
+> [osint-tools-checklist.md](osint-tools-checklist.md) — run as a manual pass
+> after each briefing. Board: https://start.me/p/L1rEYQ/osint4all
+
 ---
 
 ## Domestic US Security
