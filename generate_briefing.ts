@@ -1,240 +1,286 @@
 #!/usr/bin/env bun
 /**
- * Daily Security Briefing Generator
- * Spawns 4 parallel research agents, assembles markdown, commits & pushes to GitHub.
- * Usage: bun generate_briefing.ts [--date YYYY-MM-DD]
+ * Daily Security Briefing generator — runs on pulsar.
+ *   RSS gather (pulsar has internet) → direct OpenAI-compatible call to the mac-studio
+ *   LLM over the tailnet (LM Studio) → assemble markdown → commit & push to GitHub.
+ *
+ * No `claude`, no vault-assistant Slack bridge. Pulsar talks straight to the LLM.
+ * Delivery to Slack is handled separately by deliver.ts (pulsar-runner bot).
+ *
+ * Config (./.env, all optional):
+ *   LLM_BASE   default http://mac-studio:1234/v1      (LM Studio server over the tailnet)
+ *   LLM_MODEL  default = whatever /v1/models reports is loaded
+ *
+ * Usage: bun generate_briefing.ts [--date YYYY-MM-DD] [--dry]
+ *   --dry : gather RSS + call LLM, print markdown, no git.
  */
-
-import { spawnSync, spawn } from "child_process";
-import { existsSync, mkdirSync, appendFileSync, writeFileSync } from "fs";
-import { join, dirname, resolve } from "path";
+import { existsSync, writeFileSync, appendFileSync, readFileSync } from "fs";
+import { spawnSync } from "child_process";
+import { join, dirname } from "path";
 import { fileURLToPath } from "url";
 
 const REPO_DIR = dirname(fileURLToPath(import.meta.url));
 const BRIEFINGS_DIR = join(REPO_DIR, "briefings");
 const LOG_FILE = join(BRIEFINGS_DIR, ".log");
-const INFERENCE_TOOL = "/Users/jordanbeck/.claude/PAI/Tools/Inference.ts";
+const RECENT_HOURS = 48;
+const MAX_ITEMS = 8;        // final cap per section, after LLM relevance triage
+const MAX_CANDIDATES = 16;  // keyword-matched pool handed to the triage pass
+const DRY = process.argv.includes("--dry");
 
-// ── Date resolution ──────────────────────────────────────────────────────────
-
-function getTargetDate(): string {
-  const idx = process.argv.indexOf("--date");
-  if (idx !== -1 && process.argv[idx + 1]) {
-    const raw = process.argv[idx + 1];
-    if (!/^\d{4}-\d{2}-\d{2}$/.test(raw)) {
-      console.error(`Invalid date format "${raw}". Expected YYYY-MM-DD.`);
-      process.exit(1);
+// ── env ───────────────────────────────────────────────────────────────────────
+function envVal(key: string, dflt: string): string {
+  if (process.env[key]) return process.env[key]!;
+  try {
+    for (const line of readFileSync(join(REPO_DIR, ".env"), "utf8").split("\n")) {
+      const m = line.match(new RegExp(`^\\s*${key}\\s*=\\s*(.+?)\\s*$`));
+      if (m) return m[1].replace(/^["']|["']$/g, "");
     }
-    return raw;
-  }
-  const d = new Date();
-  d.setDate(d.getDate() - 1);
-  return d.toISOString().slice(0, 10);
+  } catch { /* no .env */ }
+  return dflt;
+}
+const LLM_BASE = envVal("LLM_BASE", "http://mac-studio:1234/v1").replace(/\/$/, "");
+// gemma-4-26b-a4b: reasoning runs away (3500+ tokens, never answers) on analytic prompts.
+// gemma-4-31b-qat: reasons briefly, terminates cleanly. no-OpenAI policy (2026-08-18) bans gpt-oss.
+let LLM_MODEL = envVal("LLM_MODEL", "google/gemma-4-31b-qat");
+const LLM_TOKEN = envVal("LLM_TOKEN", "");                 // LM Studio server API key (from .env, gitignored)
+function llmHeaders(json = false): Record<string, string> {
+  const h: Record<string, string> = {};
+  if (json) h["Content-Type"] = "application/json";
+  if (LLM_TOKEN) h["Authorization"] = `Bearer ${LLM_TOKEN}`;
+  return h;
 }
 
-// ── Logging ──────────────────────────────────────────────────────────────────
+// ── sections ────────────────────────────────────────────────────────────────────
+const SECTIONS = [
+  { key: "domestic", label: "Domestic US Security",
+    xAccounts: ["@CISAgov", "@CISACyber", "@DHSgov", "@sentdefender", "@FBI", "@CYBERCOM_DIRNSA"],
+    keywords: ["CISA", "DHS", "homeland", "critical infrastructure", "cyber", "FBI", "NSA", "Pentagon", "TSA", "border"],
+    feeds: ["https://www.cisa.gov/cybersecurity-advisories/all.xml", "https://www.defenseone.com/rss/all/", "https://www.fdd.org/feed/", "https://www.longwarjournal.org/feed", "https://warontherocks.com/feed/"] },
+  { key: "chinaTaiwan", label: "China / Taiwan",
+    xAccounts: ["@PLATracker", "@IndoPac_Info", "@TaiwansDefense", "@EBKania", "@BonnieGlaser", "@AsianOSINT"],
+    keywords: ["China", "Taiwan", "PLA", "Beijing", "Taipei", "Strait", "Indo-Pacific", "PLAN", "ADIZ", "Xi"],
+    feeds: ["https://thediplomat.com/feed/", "https://www.taipeitimes.com/xml/index.rss", "https://jamestown.org/feed/", "https://warontherocks.com/feed/"] },
+  { key: "russiaUkraine", label: "Russia / Ukraine",
+    xAccounts: ["@RALee85", "@oryxspioenkop", "@GeoConfirmed", "@OSINTtechnical", "@WarMonitor3"],
+    keywords: ["Ukraine", "Russia", "Russian", "Kyiv", "Moscow", "Zelensky", "Putin", "drone", "front line", "NATO"],
+    feeds: ["https://www.pravda.com.ua/eng/rss/", "https://www.themoscowtimes.com/rss/news", "https://www.bellingcat.com/feed/", "https://www.oryxspioenkop.com/feeds/posts/default?alt=rss", "https://warontherocks.com/feed/"] },
+  { key: "usIran", label: "US / Iran",
+    xAccounts: ["@CENTCOM", "@sentdefender", "@ArmsControlWonk", "@Osint613", "@OSINTWarfare", "@KyleWOrton"],
+    keywords: ["Iran", "Iranian", "IRGC", "Tehran", "CENTCOM", "Houthi", "nuclear", "Hormuz", "proxy", "Middle East"],
+    feeds: ["https://www.timesofisrael.com/feed/", "https://www.longwarjournal.org/feed", "https://www.fdd.org/feed/", "https://warontherocks.com/feed/"] },
+];
 
 function log(msg: string) {
   const line = `[${new Date().toISOString()}] ${msg}`;
   console.log(line);
-  appendFileSync(LOG_FILE, line + "\n");
+  try { appendFileSync(LOG_FILE, line + "\n"); } catch { /* dir may not exist on --dry */ }
 }
 
-// ── OSINT source lists ───────────────────────────────────────────────────────
+function targetDate(): string {
+  const i = process.argv.indexOf("--date");
+  if (i !== -1 && process.argv[i + 1]) return process.argv[i + 1];
+  const et = new Date(new Date().toLocaleString("en-US", { timeZone: "America/New_York" }));
+  et.setDate(et.getDate() - 1);
+  return et.toISOString().slice(0, 10);
+}
 
-const SOURCES = {
-  domestic: {
-    label: "Domestic US Security",
-    xAccounts: ["@CISAgov", "@CISACyber", "@DHSgov", "@sentdefender", "@FBI", "@CYBERCOM_DIRNSA"],
-    keywords: "homeland security, CISA, DHS, DoD, domestic threats, critical infrastructure, cybersecurity",
-  },
-  chinaTaiwan: {
-    label: "China / Taiwan",
-    xAccounts: ["@PLATracker", "@IndoPac_Info", "@TaiwansDefense", "@EBKania", "@BonnieGlaser", "@AsianOSINT"],
-    keywords: "PLA, Taiwan Strait, CCP, PLAN, ADIZ incursion, Indo-Pacific, Taiwan defense",
-  },
-  russiaUkraine: {
-    label: "Russia / Ukraine",
-    xAccounts: ["@RALee85", "@oryxspioenkop", "@GeoConfirmed", "@OSINTtechnical", "@WarMonitor3"],
-    keywords: "Ukraine front lines, Russian military, battlefield OSINT, weapons, escalation, NATO, Western aid",
-  },
-  usIran: {
-    label: "US / Iran",
-    xAccounts: ["@CENTCOM", "@sentdefender", "@ArmsControlWonk", "@Osint613", "@OSINTWarfare", "@KyleWOrton"],
-    keywords: "CENTCOM, Iran, IRGC, nuclear talks, proxy forces, Houthi, Middle East operations",
-  },
-};
+// ── RSS ───────────────────────────────────────────────────────────────────────
+type Item = { title: string; url: string; when: number; blurb: string };
+function decode(s: string): string {
+  return (s || "")
+    .replace(/<!\[CDATA\[([\s\S]*?)\]\]>/g, "$1").replace(/<[^>]+>/g, " ")
+    .replace(/&amp;/g, "&").replace(/&lt;/g, "<").replace(/&gt;/g, ">")
+    .replace(/&apos;/g, "'").replace(/&quot;/g, '"').replace(/&nbsp;/g, " ")
+    .replace(/&#x([0-9a-fA-F]+);/g, (_, h) => String.fromCodePoint(parseInt(h, 16)))
+    .replace(/&#(\d+);/g, (_, d) => String.fromCodePoint(parseInt(d, 10)))
+    .replace(/\s+/g, " ").trim();
+}
+function parseFeed(xml: string): Item[] {
+  const blocks = xml.match(/<(item|entry)[\s\S]*?<\/(item|entry)>/gi) || [];
+  const out: Item[] = [];
+  for (const b of blocks) {
+    const title = decode((b.match(/<title[^>]*>([\s\S]*?)<\/title>/i) || [])[1] || "");
+    let url = decode((b.match(/<link[^>]*>([\s\S]*?)<\/link>/i) || [])[1] || "");
+    if (!url) url = (b.match(/<link[^>]*href="([^"]+)"/i) || [])[1] || "";
+    const dateRaw = (b.match(/<(pubDate|published|updated|dc:date)[^>]*>([\s\S]*?)<\/\1>/i) || [])[2] || "";
+    const blurb = decode((b.match(/<(description|summary|content)[^>]*>([\s\S]*?)<\/\1>/i) || [])[2] || "").slice(0, 400);
+    const when = dateRaw ? Date.parse(dateRaw) : NaN;
+    if (title && url) out.push({ title, url, when: isNaN(when) ? 0 : when, blurb });
+  }
+  return out;
+}
+async function fetchFeed(url: string): Promise<Item[]> {
+  try {
+    const ctrl = new AbortController();
+    const t = setTimeout(() => ctrl.abort(), 20_000);
+    const r = await fetch(url, { headers: { "User-Agent": "pulsar-briefing/1.0" }, signal: ctrl.signal });
+    clearTimeout(t);
+    if (!r.ok) { log(`  feed ${r.status}: ${url}`); return []; }
+    return parseFeed(await r.text());
+  } catch (e: any) { log(`  feed error ${url}: ${e?.message || e}`); return []; }
+}
+async function gather(s: typeof SECTIONS[number]): Promise<Item[]> {
+  const cutoff = Date.now() - RECENT_HOURS * 3600_000;
+  const all = (await Promise.all(s.feeds.map(fetchFeed))).flat();
+  // word-boundary match so "Xi" doesn't hit "Mexico", "PLA" doesn't hit "display", etc.
+  const kwre = s.keywords.map((k) => new RegExp(`\\b${k.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\b`, "i"));
+  const NOISE = /\b(world cup|soccer|olympic|MRT|metro line|credit card|box office|celebrity|recipe)\b/i;
+  const seen = new Set<string>(); const picked: Item[] = [];
+  for (const it of all.sort((a, b) => b.when - a.when)) {
+    if (it.when && it.when < cutoff) continue;
+    const hay = it.title + " " + it.blurb;
+    if (NOISE.test(hay)) continue;                    // drop obvious sports/lifestyle/transit cruft
+    if (!kwre.some((re) => re.test(hay))) continue;
+    const d = it.title.toLowerCase().slice(0, 60);
+    if (seen.has(d)) continue; seen.add(d);
+    picked.push(it);
+    if (picked.length >= MAX_CANDIDATES) break;
+  }
+  return picked;
+}
 
-type FocusKey = keyof typeof SOURCES;
+// Remove reasoning blocks entirely (content included), plus stray tags.
+function stripThink(s: string): string {
+  return s.replace(/<think>[\s\S]*?<\/think>/gi, "").replace(/<\/?think>/gi, "").trim();
+}
 
-// ── Research agent via PAI Inference ────────────────────────────────────────
-
-async function runAgent(key: FocusKey, date: string): Promise<string> {
-  const src = SOURCES[key];
-  const prompt = `You are a security intelligence analyst compiling a daily briefing.
-
-Date to cover: ${date} (use news from this specific date or the 24 hours prior).
-
-Focus area: ${src.label}
-Keywords: ${src.keywords}
-Key OSINT X accounts to reference for context: ${src.xAccounts.join(", ")}
-
-Your task:
-1. Research real news events from ${date} related to this focus area.
-2. Draw on reporting from Reuters, AP, BBC, WSJ, NYT, Washington Post, Foreign Policy, Defense One, War on the Rocks, and similar reputable outlets.
-3. Write a factual summary of 4-6 sentences covering the most significant developments.
-4. Include at least 2 real, verifiable source URLs.
-5. Do NOT invent facts, quotes, or URLs. If news is sparse, say so honestly.
-
-Return ONLY the briefing text and source URLs. No preamble. Format:
-<summary>
-[4-6 sentence factual summary]
-</summary>
-<sources>
-- [Source name]: [URL]
-- [Source name]: [URL]
-</sources>`;
-
-  return new Promise((resolve, reject) => {
-    const env = { ...process.env };
-    delete env.ANTHROPIC_API_KEY;
-    delete env.CLAUDECODE;
-
-    const proc = spawn("claude", [
-      "--print",
-      "--model", "claude-sonnet-4-6",
-      "--allowedTools", "WebSearch,WebFetch",
-      "--output-format", "text",
-      "--setting-sources", "",
-    ], { env });
-
-    let output = "";
-    let errOutput = "";
-
-    proc.stdin.write(prompt);
-    proc.stdin.end();
-
-    proc.stdout.on("data", (d: Buffer) => { output += d.toString(); });
-    proc.stderr.on("data", (d: Buffer) => { errOutput += d.toString(); });
-
-    proc.on("close", (code) => {
-      if (code !== 0 || !output.trim()) {
-        reject(new Error(`Agent ${key} failed (exit ${code}): ${errOutput.slice(0, 200)}`));
-      } else {
-        resolve(output.trim());
-      }
+// ── LLM relevance triage ─────────────────────────────────────────────────────
+// Keyword matching alone lets country-name noise through (Taipei Times lifestyle/biz
+// items match "Taiwan", etc.). Ask the model which candidates are genuinely
+// security/defense/geopolitics relevant BEFORE synthesis, so junk never reaches the
+// briefing prose or its Sources list. Fail open: on any error, keep the first MAX_ITEMS.
+async function triage(s: typeof SECTIONS[number], items: Item[]): Promise<Item[]> {
+  if (items.length <= 1) return items;
+  const listing = items.map((it, i) => `${i + 1}. ${it.title} — ${it.blurb.slice(0, 200)}`).join("\n");
+  const prompt =
+    `You are screening news items for the "${s.label}" section of a security intelligence briefing. `
+    + `Keep ONLY items about security, defense, military, cyber, intelligence/espionage, or geopolitics. `
+    + `Discard business, markets, lifestyle, culture, sports, human-interest, and transit items even if they mention relevant countries. `
+    + `Reply with ONLY the numbers of the items to keep, comma-separated (e.g. 1,3,4). If none qualify, reply NONE.\n\n${listing}`;
+  try {
+    const model = await llmModel();
+    const r = await fetch(`${LLM_BASE}/chat/completions`, {
+      method: "POST",
+      headers: llmHeaders(true),
+      // reasoning lands in reasoning_content but still burns completion tokens — budget for it
+      body: JSON.stringify({ model, messages: [{ role: "user", content: prompt }], temperature: 0, max_tokens: 2000 }),
+      signal: AbortSignal.timeout(120_000),
     });
+    if (!r.ok) throw new Error(`LLM ${r.status}`);
+    const j: any = await r.json();
+    const text = stripThink(j?.choices?.[0]?.message?.content || "");
+    if (/\bNONE\b/i.test(text)) return [];
+    const idx = [...new Set((text.match(/\d+/g) || []).map(Number))].filter((n) => n >= 1 && n <= items.length);
+    if (!idx.length) throw new Error("no indices parsed");
+    return idx.map((n) => items[n - 1]).slice(0, MAX_ITEMS);
+  } catch (e: any) {
+    log(`  ${s.label}: triage failed (${e?.message || e}) — keeping first ${MAX_ITEMS} keyword matches`);
+    return items.slice(0, MAX_ITEMS);
+  }
+}
+
+// ── LLM (OpenAI-compatible, direct over tailnet) ─────────────────────────────────
+async function llmModel(): Promise<string> {
+  if (LLM_MODEL) return LLM_MODEL;
+  const r = await fetch(`${LLM_BASE}/models`, { headers: llmHeaders(), signal: AbortSignal.timeout(15_000) });
+  const j: any = await r.json();
+  const id = j?.data?.[0]?.id;
+  if (!id) throw new Error("no model loaded on LLM server");
+  LLM_MODEL = id;
+  return id;
+}
+async function synthesize(s: typeof SECTIONS[number], date: string, items: Item[], maxTokens = 3500): Promise<string> {
+  const articles = items.map((it, i) => `[${i + 1}] ${it.title}\n${it.blurb}`).join("\n\n");
+  const prompt =
+    `You are a security intelligence analyst writing the "${s.label}" section of a daily briefing for ${date}. `
+    + `Below are real news items from the last day or two. Write ONE factual paragraph of 5-8 sentences summarizing the most significant SECURITY developments — military, cyber, intelligence, defense policy, geopolitical risk. `
+    + `Lead with the most consequential development. Ignore any item that is not security-relevant (business, lifestyle, culture); do not mention it at all. `
+    + `Use ONLY what the items support; preserve specific details (places, units, numbers, names, dates) when present; do not invent facts. `
+    + `If the items are thin, say plainly that limited developments were reported. Output prose only — no headers, lists, bold, or citations.\n\n`
+    + `News items:\n${articles}`;
+  const model = await llmModel();
+  const r = await fetch(`${LLM_BASE}/chat/completions`, {
+    method: "POST",
+    headers: llmHeaders(true),
+    body: JSON.stringify({
+      model,
+      messages: [{ role: "user", content: prompt }],
+      temperature: 0.3,
+      max_tokens: maxTokens, // gemma reasoning (reasoning_content) burns completion tokens before the visible answer
+    }),
+    signal: AbortSignal.timeout(180_000),
   });
-}
-
-// ── Markdown assembly ────────────────────────────────────────────────────────
-
-function parseAgentOutput(raw: string): { summary: string; sources: string } {
-  const summaryMatch = raw.match(/<summary>([\s\S]*?)<\/summary>/);
-  const sourcesMatch = raw.match(/<sources>([\s\S]*?)<\/sources>/);
-  return {
-    summary: summaryMatch ? summaryMatch[1].trim() : raw.trim(),
-    sources: sourcesMatch ? sourcesMatch[1].trim() : "",
-  };
-}
-
-function assembleBriefing(date: string, results: Record<FocusKey, string>): string {
-  const sections = (Object.keys(SOURCES) as FocusKey[]).map((key) => {
-    const { label, xAccounts } = SOURCES[key];
-    const { summary, sources } = parseAgentOutput(results[key]);
-    return `## ${label}
-
-${summary}
-
-**Sources:**
-${sources || "_No sources returned._"}
-
-**OSINT X Accounts:** ${xAccounts.join(", ")}`;
-  });
-
-  return `# Daily Security Briefing — ${date}
-
-${sections.join("\n\n---\n\n")}
-
----
-
-_Generated: ${new Date().toUTCString()} | JBeck Cyber automated briefing_
-`;
-}
-
-// ── Git operations ───────────────────────────────────────────────────────────
-
-function gitCommitAndPush(filePath: string, date: string) {
-  const run = (args: string[]) => {
-    const r = spawnSync("git", args, { cwd: REPO_DIR, stdio: "inherit" });
-    if (r.status !== 0) throw new Error(`git ${args[0]} failed (exit ${r.status})`);
-  };
-  run(["add", filePath]);
-  run(["commit", "-m", `briefing: ${date} daily security update`]);
-  run(["push", "origin", "main"]);
-}
-
-// ── Main ─────────────────────────────────────────────────────────────────────
-
-async function main() {
-  mkdirSync(BRIEFINGS_DIR, { recursive: true });
-
-  const date = getTargetDate();
-  log(`Starting briefing generation for ${date}`);
-
-  const outPath = join(BRIEFINGS_DIR, `${date}.md`);
-  if (!resolve(outPath).startsWith(resolve(BRIEFINGS_DIR) + "/")) {
-    log("FATAL: Path traversal detected in date argument");
-    process.exit(1);
+  if (!r.ok) throw new Error(`LLM ${r.status}: ${(await r.text()).slice(0, 200)}`);
+  const j: any = await r.json();
+  const out = (j?.choices?.[0]?.message?.content || "").trim();
+  const cleaned = stripThink(out);
+  if (!cleaned) {
+    const fr = j?.choices?.[0]?.finish_reason;
+    const usage = JSON.stringify(j?.usage || {});
+    throw new Error(`empty LLM response (finish_reason=${fr} usage=${usage})`);
   }
-  if (existsSync(outPath)) {
-    log(`Briefing for ${date} already exists — skipping.`);
-    process.exit(0);
-  }
-
-  log("Spawning 4 parallel research agents...");
-  const keys = Object.keys(SOURCES) as FocusKey[];
-  let results: Record<FocusKey, string>;
-
+  return cleaned;
+}
+// LM Studio can still be waking up (mac-studio not logged in / server not bound yet) when the
+// 06:00 ET cron fires first — one retry after a short backoff absorbs that without losing the
+// whole day's briefing to a single not-yet-warm connection.
+function isConnFailure(e: any): boolean {
+  return /unable to connect|econnrefused|fetch failed/i.test(String(e?.message || e || ""));
+}
+async function synthesizeWithRetry(s: typeof SECTIONS[number], date: string, items: Item[]): Promise<string> {
   try {
-    const outputs = await Promise.all(
-      keys.map(async (k) => {
-        const out = await runAgent(k, date);
-        if (!out.trim()) throw new Error(`Agent ${k} returned empty result`);
-        return out;
-      })
-    );
-    results = Object.fromEntries(keys.map((k, i) => [k, outputs[i]])) as Record<FocusKey, string>;
-  } catch (err) {
-    log(`FATAL: Agent failure — ${err}`);
-    process.exit(1);
-  }
-
-  const markdown = assembleBriefing(date, results);
-
-  if (markdown.includes("{{") || markdown.includes("TODO") || markdown.includes("[INSERT")) {
-    log("FATAL: Briefing contains unfilled placeholder text — aborting commit");
-    process.exit(1);
-  }
-
-  try {
-    writeFileSync(outPath, markdown, { flag: "wx" });
-  } catch (err: any) {
-    if (err.code === "EEXIST") {
-      log(`Briefing for ${date} already exists — skipping.`);
-      process.exit(0);
+    return await synthesize(s, date, items);
+  } catch (e: any) {
+    if (/finish_reason=length/.test(String(e?.message || ""))) {
+      log(`  ${s.label}: reasoning ate the token budget — retrying with 8000`);
+      return await synthesize(s, date, items, 8000);
     }
-    throw err;
-  }
-  log(`Briefing written to ${outPath}`);
-
-  try {
-    gitCommitAndPush(outPath, date);
-    log(`Successfully committed and pushed briefing for ${date}`);
-  } catch (err) {
-    log(`FATAL: Git push failed — ${err}`);
-    process.exit(1);
+    if (!isConnFailure(e)) throw e;
+    log(`  ${s.label}: connect failed (${e?.message || e}) — retrying in 30s`);
+    await new Promise((r) => setTimeout(r, 30_000));
+    return await synthesize(s, date, items);
   }
 }
 
-main();
+// ── assemble + git ──────────────────────────────────────────────────────────────
+function assemble(date: string, res: Record<string, { prose: string; items: Item[] }>): string {
+  const secs = SECTIONS.map((s) => {
+    const r = res[s.key];
+    const sources = r.items.length ? r.items.map((it) => `- ${it.title}: ${it.url}`).join("\n") : "_No fresh sources found for this section._";
+    return `## ${s.label}\n\n${r.prose}\n\n**Sources:**\n${sources}\n\n**OSINT X Accounts:** ${s.xAccounts.join(", ")}`;
+  });
+  return `# Daily Security Briefing — ${date}\n\n${secs.join("\n\n---\n\n")}\n\n---\n\n_Generated: ${new Date().toUTCString()} | pulsar + mac-studio LLM | JBeck Cyber_\n`;
+}
+function gitPush(file: string, date: string) {
+  const run = (args: string[]) => { const r = spawnSync("git", args, { cwd: REPO_DIR, stdio: "inherit" }); if (r.status !== 0) throw new Error(`git ${args.join(" ")} failed`); };
+  run(["add", file]); run(["commit", "-m", `briefing: ${date} daily security update`]); run(["push", "origin", "main"]);
+}
+
+// ── main ────────────────────────────────────────────────────────────────────────
+const date = targetDate();
+const outPath = join(BRIEFINGS_DIR, `${date}.md`);
+if (existsSync(outPath) && !DRY) { log(`briefing ${date} already exists — skipping`); process.exit(0); }
+log(`generating ${date}${DRY ? " (dry)" : ""} via ${LLM_BASE}`);
+
+const res: Record<string, { prose: string; items: Item[] }> = {};
+for (const s of SECTIONS) {
+  const candidates = await gather(s);
+  const items = await triage(s, candidates);
+  if (candidates.length !== items.length) log(`  ${s.label}: triage kept ${items.length}/${candidates.length}`);
+  let prose: string;
+  try {
+    prose = items.length ? await synthesizeWithRetry(s, date, items)
+      : "Limited developments were reported in the sources monitored for this area over the past day.";
+  } catch (e: any) { log(`FATAL ${s.label}: ${e?.message || e}`); process.exit(1); }
+  log(`  ${s.label}: ${items.length} items, ${prose.length} chars`);
+  res[s.key] = { prose, items };
+}
+
+const md = assemble(date, res);
+if (DRY) { console.log("\n===== DRY OUTPUT =====\n" + md); process.exit(0); }
+
+writeFileSync(outPath, md, { flag: "wx" });
+log(`wrote ${outPath}`);
+try { gitPush(outPath, date); log(`pushed ${date}`); }
+catch (e: any) { log(`git push FAILED: ${e?.message || e}`); process.exit(1); }
+log("done");
