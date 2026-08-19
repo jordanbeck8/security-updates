@@ -22,7 +22,6 @@ import { fileURLToPath } from "url";
 const REPO_DIR = dirname(fileURLToPath(import.meta.url));
 const BRIEFINGS_DIR = join(REPO_DIR, "briefings");
 const LOG_FILE = join(BRIEFINGS_DIR, ".log");
-const RECENT_HOURS = 48;
 const MAX_ITEMS = 8;        // final cap per section, after LLM relevance triage
 const MAX_CANDIDATES = 16;  // keyword-matched pool handed to the triage pass
 const DRY = process.argv.includes("--dry");
@@ -119,15 +118,22 @@ async function fetchFeed(url: string): Promise<Item[]> {
     return parseFeed(await r.text());
   } catch (e: any) { log(`  feed error ${url}: ${e?.message || e}`); return []; }
 }
-async function gather(s: typeof SECTIONS[number]): Promise<Item[]> {
-  const cutoff = Date.now() - RECENT_HOURS * 3600_000;
+// The briefing is for ONE day. Window = target date 00:00–24:00 ET (feeds publish in UTC;
+// ET is UTC-4/-5 — use -4 during DST season, close enough for daily news granularity).
+// Undated items are DROPPED: a daily brief cannot include items it can't place in time.
+function dayWindow(date: string): { start: number; end: number } {
+  const start = Date.parse(`${date}T00:00:00-04:00`);
+  return { start, end: start + 24 * 3600_000 };
+}
+async function gather(s: typeof SECTIONS[number], date: string): Promise<Item[]> {
+  const { start, end } = dayWindow(date);
   const all = (await Promise.all(s.feeds.map(fetchFeed))).flat();
   // word-boundary match so "Xi" doesn't hit "Mexico", "PLA" doesn't hit "display", etc.
   const kwre = s.keywords.map((k) => new RegExp(`\\b${k.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\b`, "i"));
   const NOISE = /\b(world cup|soccer|olympic|MRT|metro line|credit card|box office|celebrity|recipe)\b/i;
   const seen = new Set<string>(); const picked: Item[] = [];
   for (const it of all.sort((a, b) => b.when - a.when)) {
-    if (it.when && it.when < cutoff) continue;
+    if (!it.when || it.when < start || it.when >= end) continue; // strictly the target day; undated dropped
     const hay = it.title + " " + it.blurb;
     if (NOISE.test(hay)) continue;                    // drop obvious sports/lifestyle/transit cruft
     if (!kwre.some((re) => re.test(hay))) continue;
@@ -154,8 +160,9 @@ async function triage(s: typeof SECTIONS[number], items: Item[]): Promise<Item[]
   const listing = items.map((it, i) => `${i + 1}. ${it.title} — ${it.blurb.slice(0, 200)}`).join("\n");
   const prompt =
     `You are screening news items for the "${s.label}" section of a security intelligence briefing. `
-    + `Keep ONLY items about security, defense, military, cyber, intelligence/espionage, or geopolitics. `
+    + `Keep ONLY items reporting security, defense, military, cyber, intelligence/espionage, or geopolitical DEVELOPMENTS — things that happened. `
     + `Discard business, markets, lifestyle, culture, sports, human-interest, and transit items even if they mention relevant countries. `
+    + `Also discard event announcements, podcasts, webinars, and undated opinion/overview essays — they are not developments. `
     + `Reply with ONLY the numbers of the items to keep, comma-separated (e.g. 1,3,4). If none qualify, reply NONE.\n\n${listing}`;
   try {
     const model = await llmModel();
@@ -193,7 +200,8 @@ async function synthesize(s: typeof SECTIONS[number], date: string, items: Item[
   const articles = items.map((it, i) => `[${i + 1}] ${it.title}\n${it.blurb}`).join("\n\n");
   const prompt =
     `You are a security intelligence analyst writing the "${s.label}" section of a daily briefing for ${date}. `
-    + `Below are real news items from the last day or two. Write ONE factual paragraph of 5-8 sentences summarizing the most significant SECURITY developments — military, cyber, intelligence, defense policy, geopolitical risk. `
+    + `Below are real news items published on ${date}. Write ONE factual paragraph of 5-8 sentences summarizing the most significant SECURITY developments FROM THAT DAY — military, cyber, intelligence, defense policy, geopolitical risk. `
+    + `This is a daily brief, not a period overview: report what happened on ${date}, not general trends or background context beyond what the items state. `
     + `Lead with the most consequential development. Ignore any item that is not security-relevant (business, lifestyle, culture); do not mention it at all. `
     + `Use ONLY what the items support; preserve specific details (places, units, numbers, names, dates) when present; do not invent facts. `
     + `If the items are thin, say plainly that limited developments were reported. Output prose only — no headers, lists, bold, or citations.\n\n`
@@ -208,7 +216,8 @@ async function synthesize(s: typeof SECTIONS[number], date: string, items: Item[
       temperature: 0.3,
       max_tokens: maxTokens, // gemma reasoning (reasoning_content) burns completion tokens before the visible answer
     }),
-    signal: AbortSignal.timeout(180_000),
+    // 31B on the Studio does ~15-20 tok/s; scale the deadline with the budget
+    signal: AbortSignal.timeout(maxTokens > 3500 ? 600_000 : 300_000),
   });
   if (!r.ok) throw new Error(`LLM ${r.status}: ${(await r.text()).slice(0, 200)}`);
   const j: any = await r.json();
@@ -264,7 +273,7 @@ log(`generating ${date}${DRY ? " (dry)" : ""} via ${LLM_BASE}`);
 
 const res: Record<string, { prose: string; items: Item[] }> = {};
 for (const s of SECTIONS) {
-  const candidates = await gather(s);
+  const candidates = await gather(s, date);
   const items = await triage(s, candidates);
   if (candidates.length !== items.length) log(`  ${s.label}: triage kept ${items.length}/${candidates.length}`);
   let prose: string;
