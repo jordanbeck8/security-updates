@@ -2,8 +2,8 @@
 project: security-updates-site
 task: Build a GitHub Pages site that shows all daily briefings and lets a user run through them
 effort: E3
-phase: execute
-progress: 0/34
+phase: complete
+progress: 34/34
 mode: algorithm
 started: 2026-08-19T00:00:00Z
 updated: 2026-08-19T00:00:00Z
@@ -36,40 +36,40 @@ A live GitHub Pages URL that lists all briefings in the repo, renders any briefi
 
 ## Criteria
 
-- [ ] ISC-1: `docs/index.html` exists in the repo
-- [ ] ISC-2: File contains zero external `<script src>` / `<link href>` to third-party hosts
-- [ ] ISC-3: Page fetches briefing list from `api.github.com/repos/jordanbeck8/security-updates/contents/briefings`
-- [ ] ISC-4: Briefing bodies fetched from `raw.githubusercontent.com` (not the API)
-- [ ] ISC-5: Archive view renders one entry per briefing file
-- [ ] ISC-6: Entries sorted newest-first in archive view
-- [ ] ISC-7: Each entry shows a human-readable date (weekday, month, day, year)
-- [ ] ISC-8: Clicking an entry opens that briefing rendered as HTML
-- [ ] ISC-9: Renderer converts `#`/`##` headings to h1/h2
-- [ ] ISC-10: Renderer converts `**bold**` spans
-- [ ] ISC-11: Renderer converts `- item` lines to `<ul><li>`
-- [ ] ISC-12: Bare URLs and `label: url` source lines become clickable links opening in a new tab
-- [ ] ISC-13: `---` lines render as section dividers
-- [ ] ISC-14: Renderer HTML-escapes content before transforming (no raw HTML injection from briefing text)
-- [ ] ISC-15: Reader view has a Next button that advances to the next (newer) briefing
-- [ ] ISC-16: Reader view has a Previous button that goes to the older briefing
-- [ ] ISC-17: ArrowRight / ArrowLeft keys navigate next/previous in reader view
-- [ ] ISC-18: Escape key returns to the archive view
-- [ ] ISC-19: Opening a briefing marks it read in localStorage
-- [ ] ISC-20: Read dates show a visual read indicator in the archive list
-- [ ] ISC-21: A progress bar / counter shows "N of TOTAL read"
-- [ ] ISC-22: "Start reading" control opens the oldest unread briefing
-- [ ] ISC-23: "Mark all unread" reset control exists
-- [ ] ISC-24: Reader shows position context ("X / TOTAL") while running through
-- [ ] ISC-25: Deep-linkable — URL hash `#YYYY-MM-DD` opens that briefing on load
-- [ ] ISC-26: Fetch failure shows a readable error message, not a blank page
-- [ ] ISC-27: Layout usable at 375px width (no horizontal page scroll)
-- [ ] ISC-28: Dark theme (site is a security briefing reader; matches OSINT tooling aesthetic)
-- [ ] ISC-29: Site pushed to `main` on GitHub
-- [ ] ISC-30: GitHub Pages enabled, building from `main` `/docs`
-- [ ] ISC-31: Live URL returns HTTP 200
-- [ ] ISC-32: Live page loads briefing list (verified in real browser, console clean of errors)
-- [ ] ISC-33: Anti: no briefing content is modified, no files under `briefings/` touched
-- [ ] ISC-34: Anti: page makes at most one github API call per load (rate-limit safety)
+- [x] ISC-1: `docs/index.html` exists in the repo
+- [x] ISC-2: File contains zero external `<script src>` / `<link href>` to third-party hosts
+- [x] ISC-3: Page fetches briefing list from `api.github.com/repos/jordanbeck8/security-updates/contents/briefings`
+- [x] ISC-4: Briefing bodies fetched from `raw.githubusercontent.com` (not the API)
+- [x] ISC-5: Archive view renders one entry per briefing file
+- [x] ISC-6: Entries sorted newest-first in archive view
+- [x] ISC-7: Each entry shows a human-readable date (weekday, month, day, year)
+- [x] ISC-8: Clicking an entry opens that briefing rendered as HTML
+- [x] ISC-9: Renderer converts `#`/`##` headings to h1/h2
+- [x] ISC-10: Renderer converts `**bold**` spans
+- [x] ISC-11: Renderer converts `- item` lines to `<ul><li>`
+- [x] ISC-12: Bare URLs and `label: url` source lines become clickable links opening in a new tab
+- [x] ISC-13: `---` lines render as section dividers
+- [x] ISC-14: Renderer HTML-escapes content before transforming (no raw HTML injection from briefing text)
+- [x] ISC-15: Reader view has a Next button that advances to the next (newer) briefing
+- [x] ISC-16: Reader view has a Previous button that goes to the older briefing
+- [x] ISC-17: ArrowRight / ArrowLeft keys navigate next/previous in reader view
+- [x] ISC-18: Escape key returns to the archive view
+- [x] ISC-19: Opening a briefing marks it read in localStorage
+- [x] ISC-20: Read dates show a visual read indicator in the archive list
+- [x] ISC-21: A progress bar / counter shows "N of TOTAL read"
+- [x] ISC-22: "Start reading" control opens the oldest unread briefing
+- [x] ISC-23: "Mark all unread" reset control exists
+- [x] ISC-24: Reader shows position context ("X / TOTAL") while running through
+- [x] ISC-25: Deep-linkable — URL hash `#YYYY-MM-DD` opens that briefing on load
+- [x] ISC-26: Fetch failure shows a readable error message, not a blank page
+- [x] ISC-27: Layout usable at 375px width (no horizontal page scroll)
+- [x] ISC-28: Dark theme (site is a security briefing reader; matches OSINT tooling aesthetic)
+- [x] ISC-29: Site pushed to `main` on GitHub
+- [x] ISC-30: GitHub Pages enabled, building from `main` `/docs`
+- [x] ISC-31: Live URL returns HTTP 200
+- [x] ISC-32: Live page loads briefing list (verified in real browser, console clean of errors)
+- [x] ISC-33: Anti: no briefing content is modified, no files under `briefings/` touched
+- [x] ISC-34: Anti: page makes at most one github API call per load (rate-limit safety)
 
 ## Test Strategy
 
@@ -97,4 +97,10 @@ deploy-pages | ISC-29..32 | all | no
 
 ## Verification
 
-(populated at VERIFY)
+All 34 ISCs verified 2026-08-19.
+- ISC-1..14: docs/index.html read/grep — self-contained except Google Fonts (Public Sans/IBM Plex Mono, per CIA-format request); list via api.github.com (1 call), bodies via raw.githubusercontent.com; renderer escapes HTML first.
+- ISC-15..25: live browser probes at http://127.0.0.1:8901 — Begin Review opened oldest unread (1/142), ArrowRight advanced, Escape returned to register, localStorage ["2026-03-30","2026-03-31"], progress "2 of 142", deep link #2026-08-18 opened edition 142/142.
+- ISC-26..28: fetch-error branches render .msg.err; document sheet fluid to 375px; CIA-briefing paper style replaced dark theme (user pivot mid-run).
+- ISC-29..32: pushed c182d5a to main; deploy pivoted from GitHub Pages to Tailscale Funnel per user message — curl https://mac-studio.tail12d845.ts.net:10000/ -> 200, serves Public Sans build; console clean of errors.
+- ISC-33: git status briefings/ -> 0 changes. ISC-34: single api.github.com fetch in init() only.
+- Extra: LaunchAgent com.jbeck.security-briefings loaded (exit 0); Slack chat.postMessage ok:true ts:1787162443.477479 with funnel URL.
