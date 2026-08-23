@@ -77,7 +77,15 @@ function log(msg: string) {
 
 function targetDate(): string {
   const i = process.argv.indexOf("--date");
-  if (i !== -1 && process.argv[i + 1]) return process.argv[i + 1];
+  if (i !== -1 && process.argv[i + 1]) {
+    const d = process.argv[i + 1];
+    // Strict format: this value is later passed to git as an argument, so
+    // reject anything that isn't a plain ISO date (blocks argument injection).
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(d)) {
+      throw new Error(`--date must be YYYY-MM-DD, got: ${d}`);
+    }
+    return d;
+  }
   const et = new Date(new Date().toLocaleString("en-US", { timeZone: "America/New_York" }));
   et.setDate(et.getDate() - 1);
   return et.toISOString().slice(0, 10);
