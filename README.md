@@ -28,10 +28,22 @@ The pipeline runs unattended each morning on a Raspberry Pi:
 
 Section summaries are drawn from recent reporting/analysis by recognized outlets, including:
 
-- **US homeland & defense:** CISA, Defense One, FDD, Long War Journal, War on the Rocks
-- **China / Taiwan:** The Diplomat, Jamestown Foundation, Taipei Times
-- **Russia / Ukraine:** Bellingcat, Oryx, Ukrainska Pravda (English), The Moscow Times
-- **US / Iran:** FDD, Long War Journal, Times of Israel
+- **US homeland & defense:** CISA, Defense One, FDD, Long War Journal, War on the Rocks,
+  BleepingComputer, The Record, Nextgov, Breaking Defense, Military Times
+- **China / Taiwan:** Taipei Times, South China Morning Post, Asia Times, Lowy Institute
+  (The Interpreter), AEI, Jamestown Foundation, War on the Rocks, Breaking Defense
+- **Russia / Ukraine:** Kyiv Independent, Ukrainska Pravda (English), Ukrinform,
+  Euromaidan Press, Meduza (English), The Moscow Times, Bellingcat, Atlantic Council,
+  BBC News (Europe), War on the Rocks, Breaking Defense
+- **US / Iran:** Times of Israel, Long War Journal, FDD, War on the Rocks, Al-Monitor,
+  Jerusalem Post, Al Jazeera, BBC News (Middle East)
+
+> **Feed audit, 2026-09-01.** Every feed above was probed live for reachability, item
+> volume, and parseable publication dates. Two long-standing sources were retired: **Oryx**
+> (RSS newest post 2024-12-07 — the account remains active on X and is still listed there)
+> and **The Diplomat** (returns 96 items with no parseable `pubDate`, so a date-windowed
+> daily brief discarded every one — this was why the China/Taiwan section was frequently
+> empty). Sources are chosen for coverage, not endorsement; some are state-affiliated.
 
 Each section also lists recognized **OSINT X (Twitter) accounts** as a follow-reference for
 that topic — these are pointers for the reader, not scraped sources.

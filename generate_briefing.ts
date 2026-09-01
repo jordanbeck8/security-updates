@@ -22,8 +22,9 @@ import { fileURLToPath } from "url";
 const REPO_DIR = dirname(fileURLToPath(import.meta.url));
 const BRIEFINGS_DIR = join(REPO_DIR, "briefings");
 const LOG_FILE = join(BRIEFINGS_DIR, ".log");
-const MAX_ITEMS = 8;        // final cap per section, after LLM relevance triage
-const MAX_CANDIDATES = 16;  // keyword-matched pool handed to the triage pass
+const MAX_ITEMS = 12;       // final cap per section, after LLM relevance triage
+const MIN_ITEMS = 6;        // below this, widen the gather window rather than ship an empty section
+const MAX_CANDIDATES = 28;  // keyword-matched pool handed to the triage pass
 const DRY = process.argv.includes("--dry");
 
 // ── env ───────────────────────────────────────────────────────────────────────
@@ -54,19 +55,19 @@ const SECTIONS = [
   { key: "domestic", label: "Domestic US Security",
     xAccounts: ["@CISAgov", "@CISACyber", "@DHSgov", "@sentdefender", "@FBI", "@CYBERCOM_DIRNSA"],
     keywords: ["CISA", "DHS", "homeland", "critical infrastructure", "cyber", "FBI", "NSA", "Pentagon", "TSA", "border"],
-    feeds: ["https://www.cisa.gov/cybersecurity-advisories/all.xml", "https://www.defenseone.com/rss/all/", "https://www.fdd.org/feed/", "https://www.longwarjournal.org/feed", "https://warontherocks.com/feed/"] },
+    feeds: ["https://www.cisa.gov/cybersecurity-advisories/all.xml", "https://www.defenseone.com/rss/all/", "https://www.fdd.org/feed/", "https://www.longwarjournal.org/feed", "https://warontherocks.com/feed/", "https://www.bleepingcomputer.com/feed/", "https://therecord.media/feed", "https://www.nextgov.com/rss/all/", "https://breakingdefense.com/feed/", "https://www.militarytimes.com/arc/outboundfeeds/rss/?outputType=xml"] },
   { key: "chinaTaiwan", label: "China / Taiwan",
     xAccounts: ["@PLATracker", "@IndoPac_Info", "@TaiwansDefense", "@EBKania", "@BonnieGlaser", "@AsianOSINT"],
     keywords: ["China", "Taiwan", "PLA", "Beijing", "Taipei", "Strait", "Indo-Pacific", "PLAN", "ADIZ", "Xi"],
-    feeds: ["https://thediplomat.com/feed/", "https://www.taipeitimes.com/xml/index.rss", "https://jamestown.org/feed/", "https://warontherocks.com/feed/"] },
+    feeds: ["https://www.taipeitimes.com/xml/index.rss", "https://www.scmp.com/rss/4/feed", "https://asiatimes.com/feed/", "https://www.lowyinstitute.org/the-interpreter/rss.xml", "https://www.aei.org/feed/", "https://jamestown.org/feed/", "https://warontherocks.com/feed/", "https://breakingdefense.com/feed/"] },
   { key: "russiaUkraine", label: "Russia / Ukraine",
     xAccounts: ["@RALee85", "@oryxspioenkop", "@GeoConfirmed", "@OSINTtechnical", "@WarMonitor3"],
     keywords: ["Ukraine", "Russia", "Russian", "Kyiv", "Moscow", "Zelensky", "Putin", "drone", "front line", "NATO"],
-    feeds: ["https://www.pravda.com.ua/eng/rss/", "https://www.themoscowtimes.com/rss/news", "https://www.bellingcat.com/feed/", "https://www.oryxspioenkop.com/feeds/posts/default?alt=rss", "https://warontherocks.com/feed/"] },
+    feeds: ["https://kyivindependent.com/feed/rss/", "https://www.pravda.com.ua/eng/rss/", "https://www.ukrinform.net/rss/block-lastnews", "https://euromaidanpress.com/feed/", "https://meduza.io/rss/en/all", "https://www.themoscowtimes.com/rss/news", "https://www.bellingcat.com/feed/", "https://www.atlanticcouncil.org/feed/", "https://feeds.bbci.co.uk/news/world/europe/rss.xml", "https://warontherocks.com/feed/", "https://breakingdefense.com/feed/"] },
   { key: "usIran", label: "US / Iran",
     xAccounts: ["@CENTCOM", "@sentdefender", "@ArmsControlWonk", "@Osint613", "@OSINTWarfare", "@KyleWOrton"],
     keywords: ["Iran", "Iranian", "IRGC", "Tehran", "CENTCOM", "Houthi", "nuclear", "Hormuz", "proxy", "Middle East"],
-    feeds: ["https://www.timesofisrael.com/feed/", "https://www.longwarjournal.org/feed", "https://www.fdd.org/feed/", "https://warontherocks.com/feed/"] },
+    feeds: ["https://www.timesofisrael.com/feed/", "https://www.longwarjournal.org/feed", "https://www.fdd.org/feed/", "https://warontherocks.com/feed/", "https://www.al-monitor.com/rss", "https://www.jpost.com/rss/rssfeedsmiddleeastnews.aspx", "https://www.aljazeera.com/xml/rss/all.xml", "https://feeds.bbci.co.uk/news/world/middle_east/rss.xml"] },
 ];
 
 function log(msg: string) {
@@ -134,21 +135,32 @@ function dayWindow(date: string): { start: number; end: number } {
   return { start, end: start + 24 * 3600_000 };
 }
 async function gather(s: typeof SECTIONS[number], date: string): Promise<Item[]> {
-  const { start, end } = dayWindow(date);
   const all = (await Promise.all(s.feeds.map(fetchFeed))).flat();
-  // word-boundary match so "Xi" doesn't hit "Mexico", "PLA" doesn't hit "display", etc.
-  const kwre = s.keywords.map((k) => new RegExp(`\\b${k.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\b`, "i"));
-  const NOISE = /\b(world cup|soccer|olympic|MRT|metro line|credit card|box office|celebrity|recipe)\b/i;
-  const seen = new Set<string>(); const picked: Item[] = [];
-  for (const it of all.sort((a, b) => b.when - a.when)) {
-    if (!it.when || it.when < start || it.when >= end) continue; // strictly the target day; undated dropped
-    const hay = it.title + " " + it.blurb;
-    if (NOISE.test(hay)) continue;                    // drop obvious sports/lifestyle/transit cruft
-    if (!kwre.some((re) => re.test(hay))) continue;
-    const d = it.title.toLowerCase().slice(0, 60);
-    if (seen.has(d)) continue; seen.add(d);
-    picked.push(it);
-    if (picked.length >= MAX_CANDIDATES) break;
+  const pick = (start: number, end: number): Item[] => {
+    // word-boundary match so "Xi" doesn't hit "Mexico", "PLA" doesn't hit "display", etc.
+    const kwre = s.keywords.map((k) => new RegExp(`\\b${k.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\b`, "i"));
+    const NOISE = /\b(world cup|soccer|olympic|MRT|metro line|credit card|box office|celebrity|recipe)\b/i;
+    const seen = new Set<string>(); const picked: Item[] = [];
+    for (const it of all.sort((a, b) => b.when - a.when)) {
+      if (!it.when || it.when < start || it.when >= end) continue; // undated dropped
+      const hay = it.title + " " + it.blurb;
+      if (NOISE.test(hay)) continue;
+      if (!kwre.some((re) => re.test(hay))) continue;
+      const d = it.title.toLowerCase().slice(0, 60);
+      if (seen.has(d)) continue; seen.add(d);
+      picked.push(it);
+      if (picked.length >= MAX_CANDIDATES) break;
+    }
+    return picked;
+  };
+  const { start, end } = dayWindow(date);
+  let picked = pick(start, end);
+  if (picked.length < MIN_ITEMS) {
+    const widened = pick(start - 24 * 3600_000, end);
+    if (widened.length > picked.length) {
+      log(`  ${s.label}: only ${picked.length} items on ${date} — widening to 48h (${widened.length})`);
+      picked = widened;
+    }
   }
   return picked;
 }
@@ -204,15 +216,15 @@ async function llmModel(): Promise<string> {
   LLM_MODEL = id;
   return id;
 }
-async function synthesize(s: typeof SECTIONS[number], date: string, items: Item[], maxTokens = 3500): Promise<string> {
+async function synthesize(s: typeof SECTIONS[number], date: string, items: Item[], maxTokens = 4000): Promise<string> {
   const articles = items.map((it, i) => `[${i + 1}] ${it.title}\n${it.blurb}`).join("\n\n");
   const prompt =
     `You are a security intelligence analyst writing the "${s.label}" section of a daily briefing for ${date}. `
-    + `Below are real news items published on ${date}. Write ONE factual paragraph of 5-8 sentences summarizing the most significant SECURITY developments FROM THAT DAY — military, cyber, intelligence, defense policy, geopolitical risk. `
-    + `This is a daily brief, not a period overview: report what happened on ${date}, not general trends or background context beyond what the items state. `
-    + `Lead with the most consequential development. Ignore any item that is not security-relevant (business, lifestyle, culture); do not mention it at all. `
-    + `Use ONLY what the items support; preserve specific details (places, units, numbers, names, dates) when present; do not invent facts. `
-    + `If the items are thin, say plainly that limited developments were reported. Output prose only — no headers, lists, bold, or citations.\n\n`
+    + `Below are real news items published on ${date}. `
+    + `Write a detailed 10-14 sentence account of the most significant SECURITY developments FROM THAT DAY \u2014 military, cyber, intelligence, defense policy, geopolitical risk. `
+    + `Preserve specific details (places, units, numbers, names, dates) when present; do not invent facts. `
+    + `Ignore any item that is not security-relevant. `
+    + `If the items are thin, say so plainly rather than padding. Output prose only.\n\n`
     + `News items:\n${articles}`;
   const model = await llmModel();
   const r = await fetch(`${LLM_BASE}/chat/completions`, {
@@ -222,10 +234,11 @@ async function synthesize(s: typeof SECTIONS[number], date: string, items: Item[
       model,
       messages: [{ role: "user", content: prompt }],
       temperature: 0.3,
+      reasoning_effort: "low", // 31b will otherwise spend the whole budget reasoning and return empty
       max_tokens: maxTokens, // gemma reasoning (reasoning_content) burns completion tokens before the visible answer
     }),
     // 31B on the Studio does ~15-20 tok/s; scale the deadline with the budget
-    signal: AbortSignal.timeout(maxTokens > 3500 ? 600_000 : 300_000),
+    signal: AbortSignal.timeout(maxTokens > 5000 ? 900_000 : 600_000),
   });
   if (!r.ok) throw new Error(`LLM ${r.status}: ${(await r.text()).slice(0, 200)}`);
   const j: any = await r.json();
@@ -250,7 +263,13 @@ async function synthesizeWithRetry(s: typeof SECTIONS[number], date: string, ite
   } catch (e: any) {
     if (/finish_reason=length/.test(String(e?.message || ""))) {
       log(`  ${s.label}: reasoning ate the token budget — retrying with 8000`);
-      return await synthesize(s, date, items, 8000);
+      try {
+        return await synthesize(s, date, items, 8000);
+      } catch (e2: any) {
+        // Last chance: a smaller budget on fewer items usually terminates where 8000 stalls.
+        log(`  ${s.label}: 8000 retry failed (${e2?.message || e2}) — final short attempt`);
+        return await synthesize(s, date, items.slice(0, 6), 2500);
+      }
     }
     if (!isConnFailure(e)) throw e;
     log(`  ${s.label}: connect failed (${e?.message || e}) — retrying in 30s`);
@@ -260,10 +279,37 @@ async function synthesizeWithRetry(s: typeof SECTIONS[number], date: string, ite
 }
 
 // ── assemble + git ──────────────────────────────────────────────────────────────
+// Readable outlet name for the Sources list, derived from the article URL. The March-era
+// briefings listed "Outlet - Headline: URL" so a reader can see WHO reported something
+// before clicking; bare headlines lose that at a glance.
+const OUTLETS: Record<string, string> = {
+  "cisa.gov": "CISA", "defenseone.com": "Defense One", "fdd.org": "FDD",
+  "longwarjournal.org": "Long War Journal", "warontherocks.com": "War on the Rocks",
+  "bleepingcomputer.com": "BleepingComputer", "therecord.media": "The Record",
+  "nextgov.com": "Nextgov", "breakingdefense.com": "Breaking Defense",
+  "militarytimes.com": "Military Times",
+  "taipeitimes.com": "Taipei Times", "scmp.com": "South China Morning Post",
+  "asiatimes.com": "Asia Times", "lowyinstitute.org": "Lowy Institute",
+  "aei.org": "AEI", "jamestown.org": "Jamestown Foundation",
+  "kyivindependent.com": "Kyiv Independent", "pravda.com.ua": "Ukrainska Pravda",
+  "ukrinform.net": "Ukrinform", "euromaidanpress.com": "Euromaidan Press",
+  "meduza.io": "Meduza", "themoscowtimes.com": "The Moscow Times",
+  "bellingcat.com": "Bellingcat", "atlanticcouncil.org": "Atlantic Council",
+  "bbc.co.uk": "BBC News", "bbc.com": "BBC News",
+  "timesofisrael.com": "Times of Israel", "al-monitor.com": "Al-Monitor",
+  "jpost.com": "Jerusalem Post", "aljazeera.com": "Al Jazeera",
+};
+function outlet(url: string): string {
+  try {
+    const h = new URL(url).hostname.replace(/^www\./, "");
+    for (const [d, n] of Object.entries(OUTLETS)) if (h === d || h.endsWith("." + d)) return n;
+    return h;
+  } catch { return "source"; }
+}
 function assemble(date: string, res: Record<string, { prose: string; items: Item[] }>): string {
   const secs = SECTIONS.map((s) => {
     const r = res[s.key];
-    const sources = r.items.length ? r.items.map((it) => `- ${it.title}: ${it.url}`).join("\n") : "_No fresh sources found for this section._";
+    const sources = r.items.length ? r.items.map((it) => `- ${outlet(it.url)} \u2014 ${it.title}: ${it.url}`).join("\n") : "_No fresh sources found for this section._";
     return `## ${s.label}\n\n${r.prose}\n\n**Sources:**\n${sources}\n\n**OSINT X Accounts:** ${s.xAccounts.join(", ")}`;
   });
   return `# Daily Security Briefing — ${date}\n\n${secs.join("\n\n---\n\n")}\n\n---\n\n_Generated: ${new Date().toUTCString()} | pulsar + mac-studio LLM | JBeck Cyber_\n`;
