@@ -13,7 +13,7 @@ Each day is one file in [`briefings/`](briefings/), named by date (`YYYY-MM-DD.m
 
 ## How to read a section
 
-- **BLUF** — the single most important reported development.
+- **BLUF** (Bottom Line Up Front) — the single most important reported development, stated first.
 - **Key developments** — what happened, with the outlet that reported it.
 - **Analyst comment** — judgments, kept separate from the facts, with a stated confidence (low / moderate / high).
 - **Gaps / indicators** — what is still unknown and what to watch.
